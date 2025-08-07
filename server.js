@@ -1,45 +1,47 @@
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
+const { Server } = require('socket.io');
 const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, {
+
+const io = new Server(server, {
   cors: {
-    origin: ["https://amiralfa.ir", "https://online-3sno.onrender.com"],
-    methods: ["GET", "POST"]
+    origin: ["https://amiralfa.ir"],
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
-app.use(cors());
-
-// ذخیره اتصالات
-const rooms = {};
+// اتاق ثابت
+const PUBLIC_ROOM = 'public-room';
 
 io.on('connection', (socket) => {
-  console.log('اتصال جدید:', socket.id);
+  console.log('کاربر متصل شد:', socket.id);
 
-  socket.on('join-room', (roomId) => {
-    socket.join(roomId);
-    rooms[roomId] = socket.id;
-    console.log(`کاربر به اتاق ${roomId} پیوست`);
+  // اتصال خودکار به اتاق عمومی
+  socket.join(PUBLIC_ROOM);
+  console.log(`کاربر ${socket.id} به اتاق عمومی پیوست`);
+  
+  // ارسال تأییدیه به کلاینت
+  socket.emit('stream-ready');
+
+  // مدیریت رویدادهای WebRTC
+  socket.on('offer', (offer) => {
+    socket.to(PUBLIC_ROOM).emit('offer', offer);
   });
 
-  socket.on('offer', (data) => {
-    socket.to(data.roomId).emit('offer', data.offer);
+  socket.on('answer', (answer) => {
+    socket.to(PUBLIC_ROOM).emit('answer', answer);
   });
 
-  socket.on('answer', (data) => {
-    socket.to(data.roomId).emit('answer', data.answer);
-  });
-
-  socket.on('ice-candidate', (data) => {
-    socket.to(data.roomId).emit('ice-candidate', data.candidate);
+  socket.on('ice-candidate', (candidate) => {
+    socket.to(PUBLIC_ROOM).emit('ice-candidate', candidate);
   });
 
   socket.on('disconnect', () => {
-    console.log('کاربر قطع شد:', socket.id);
+    console.log('کاربر قطع ارتباط کرد:', socket.id);
   });
 });
 
