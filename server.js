@@ -11,41 +11,46 @@ const io = new Server(server, {
     origin: ["https://amiralfa.ir"],
     methods: ["GET", "POST"],
     credentials: true
-  }
+  },
+  allowEIO3: true
 });
 
-// اتاق ثابت
-const PUBLIC_ROOM = 'public-room';
+// اتاق عمومی برای ارتباط مستقیم
+const PUBLIC_ROOM = 'public-stream-room';
 
 io.on('connection', (socket) => {
-  console.log('کاربر متصل شد:', socket.id);
+  console.log('اتصال جدید:', socket.id);
 
-  // اتصال خودکار به اتاق عمومی
-  socket.join(PUBLIC_ROOM);
-  console.log(`کاربر ${socket.id} به اتاق عمومی پیوست`);
-  
-  // ارسال تأییدیه به کلاینت
-  socket.emit('stream-ready');
-
-  // مدیریت رویدادهای WebRTC
-  socket.on('offer', (offer) => {
-    socket.to(PUBLIC_ROOM).emit('offer', offer);
+  // مدیریت اشتراک‌گذاران
+  socket.on('register-broadcaster', () => {
+    socket.join(PUBLIC_ROOM);
+    socket.broadcast.emit('new-broadcaster');
+    console.log(`Broadcaster registered: ${socket.id}`);
   });
 
-  socket.on('answer', (answer) => {
-    socket.to(PUBLIC_ROOM).emit('answer', answer);
+  // مدیریت بینندگان
+  socket.on('register-viewer', () => {
+    socket.join(PUBLIC_ROOM);
+    const broadcaster = [...io.sockets.adapter.rooms.get(PUBLIC_ROOM)].find(id => id !== socket.id);
+    if (broadcaster) {
+      socket.emit('broadcaster-available');
+    }
   });
 
-  socket.on('ice-candidate', (candidate) => {
-    socket.to(PUBLIC_ROOM).emit('ice-candidate', candidate);
+  // انتقال سیگنالهای WebRTC
+  socket.on('signal', (data) => {
+    socket.to(data.target).emit('signal', {
+      sender: socket.id,
+      signal: data.signal
+    });
   });
 
   socket.on('disconnect', () => {
-    console.log('کاربر قطع ارتباط کرد:', socket.id);
+    console.log('قطع ارتباط:', socket.id);
   });
 });
 
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`سرور سیگنالینگ روی پورت ${PORT} اجرا می‌شود`);
+  console.log(`سرور سیگنالینگ فعال روی پورت ${PORT}`);
 });
