@@ -99,7 +99,7 @@ wss.on('connection', (ws, req) => {
 });
 
 // پورت برای اجرا
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log("🚀 WebSocket server running on port", PORT);
 });
