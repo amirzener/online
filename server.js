@@ -1,151 +1,105 @@
-// server.js
-
+const WebSocket = require('ws');
 const express = require('express');
 const http = require('http');
-const { WebSocketServer } = require('ws');
-const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const wss = new WebSocket.Server({ server });
 
-const PORT = process.env.PORT || 10000;
-const rooms = Object.create(null);
-
-function safeSend(ws, msgObj) {
-  try {
-    ws.send(JSON.stringify(msgObj));
-  } catch {}
-}
+let broadcaster = null;
+let viewers = new Set();
+let controller = null;
 
 wss.on('connection', (ws, req) => {
-  ws.isAlive = true;
-  ws.on('pong', () => (ws.isAlive = true));
-
-  ws.on('message', (raw) => {
-    let msg;
+  ws.on('message', async (msg) => {
+    let message;
     try {
-      msg = JSON.parse(raw.toString());
-    } catch {
+      message = JSON.parse(msg);
+    } catch (e) {
       return;
     }
 
-    const { type, room: roomId = ws.roomId } = msg;
-
-    // اگر join هست و اتاق وجود ندارد آن را بساز
-    if (type === 'join') {
-      const { role, room } = msg;
-      if (!room) return safeSend(ws, { type: 'error', reason: 'missing room' });
-
-      if (!rooms[room]) rooms[room] = { publisher: null, viewers: new Map() };
-      ws.roomId = room;
-      ws.role = role;
-
-      const roomObj = rooms[room];
-
-      if (role === 'publisher') {
-        if (roomObj.publisher && roomObj.publisher !== ws) {
-          safeSend(roomObj.publisher, { type: 'info', reason: 'new-publisher-replaced' });
-          // قبلی را قطع کن
-          try { roomObj.publisher.close(); } catch {}
-        }
-        roomObj.publisher = ws;
-        safeSend(ws, { type: 'joined', role: 'publisher', room });
-      } else if (role === 'viewer') {
-        const viewerId = uuidv4();
-        ws.viewerId = viewerId;
-        roomObj.viewers.set(viewerId, ws);
-        safeSend(ws, { type: 'joined', role: 'viewer', room, viewerId });
-        if (roomObj.publisher) {
-          safeSend(roomObj.publisher, { type: 'viewer-joined', viewerId });
-        }
+    // 🔹 دسته‌بندی نقش کاربر
+    if (message.type === "offer") {
+      broadcaster = ws;
+      // اطلاع به کنترلر که استریم آماده است
+      if (controller && controller.readyState === WebSocket.OPEN) {
+        controller.send(JSON.stringify({ type: "stream-ready" }));
       }
-      return;
     }
 
-    if (!roomId || !rooms[roomId]) {
-      if (type !== 'join') safeSend(ws, { type: 'error', reason: 'unknown room' });
-      return;
-    }
-    const room = rooms[roomId];
-
-    if (type === 'offer') {
-      const { viewerId, offer } = msg;
-      const viewer = room.viewers.get(viewerId);
-      if (viewer) safeSend(viewer, { type: 'offer', offer, viewerId });
-      return;
+    // 🔸 viewer جدید
+    if (message.type === "answer" && broadcaster) {
+      broadcaster.send(JSON.stringify({ type: "answer", data: message.data }));
     }
 
-    if (type === 'answer') {
-      const { viewerId, answer } = msg;
-      if (room.publisher) safeSend(room.publisher, { type: 'answer', viewerId, answer });
-      return;
-    }
-
-    if (type === 'candidate') {
-      const { viewerId, candidate } = msg;
-      if (ws.role === 'publisher') {
-        const viewer = room.viewers.get(viewerId);
-        if (viewer) safeSend(viewer, { type: 'candidate', candidate, viewerId });
-      } else if (ws.role === 'viewer') {
-        if (room.publisher) safeSend(room.publisher, { type: 'candidate', candidate, viewerId: ws.viewerId });
+    // 🔹 ICE candidate بین همه تبادل شود
+    if (message.type === "candidate") {
+      if (ws === broadcaster) {
+        viewers.forEach(v =>
+          v.readyState === WebSocket.OPEN &&
+          v.send(JSON.stringify({ type: "candidate", data: message.data }))
+        );
+      } else {
+        broadcaster && broadcaster.readyState === WebSocket.OPEN &&
+          broadcaster.send(JSON.stringify({ type: "candidate", data: message.data }));
       }
-      return;
     }
 
-    if (type === 'leave') {
-      if (ws.role === 'viewer') {
-        room.viewers.delete(ws.viewerId);
-        if (room.publisher) safeSend(room.publisher, { type: 'viewer-left', viewerId: ws.viewerId });
-      } else if (ws.role === 'publisher') {
-        for (const [, vws] of room.viewers) safeSend(vws, { type: 'publisher-left' });
-        room.publisher = null;
+    // 🔸 viewer جدید: در لیست ثبت و درخواست offer کند
+    if (message.type === "viewer") {
+      viewers.add(ws);
+      if (broadcaster) {
+        broadcaster.send(JSON.stringify({ type: "get-offer" }));
       }
-      return;
     }
 
-    // پیام‌های کنترل مثل تبلیغ و زیرنویس
-    if (type === 'control' || type === 'subtitle') {
-      for (const [, viewerWs] of room.viewers) {
-        safeSend(viewerWs, msg);
-      }
-      return;
+    // 🔹 کنترلر اتصال یافت
+    if (message.type === "controller") {
+      controller = ws;
+    }
+
+    // 🔹 کنترلر → شروع استریم
+    if (message.type === "show-stream") {
+      viewers.forEach(v =>
+        v.readyState === WebSocket.OPEN &&
+        broadcaster &&
+        broadcaster.send(JSON.stringify({ type: "get-offer" }))
+      );
+    }
+
+    // 🔸 کنترلر → تبلیغ شماره N
+    if (message.type === "play-ad") {
+      viewers.forEach(v =>
+        v.readyState === WebSocket.OPEN &&
+        v.send(JSON.stringify({
+          type: "ad",
+          number: message.ad
+        }))
+      );
+    }
+
+    // 🔸 کنترلر → ارسال زیرنویس
+    if (message.type === "subtitle") {
+      viewers.forEach(v =>
+        v.readyState === WebSocket.OPEN &&
+        v.send(JSON.stringify({
+          type: "subtitle",
+          text: message.text
+        }))
+      );
     }
   });
 
   ws.on('close', () => {
-    const roomId = ws.roomId;
-    if (!roomId || !rooms[roomId]) return;
-
-    const room = rooms[roomId];
-    if (ws.role === 'viewer') {
-      room.viewers.delete(ws.viewerId);
-      if (room.publisher) safeSend(room.publisher, { type: 'viewer-left', viewerId: ws.viewerId });
-    } else if (ws.role === 'publisher') {
-      for (const [, vws] of room.viewers) safeSend(vws, { type: 'publisher-left' });
-      room.publisher = null;
-    }
-
-    // حذف اتاق اگر خالی شد
-    if (!room.publisher && room.viewers.size === 0) {
-      delete rooms[roomId];
-    }
+    viewers.delete(ws);
+    if (ws === broadcaster) broadcaster = null;
+    if (ws === controller) controller = null;
   });
 });
 
-// پاکسازی اتصال‌های قطع شده
-setInterval(() => {
-  wss.clients.forEach(ws => {
-    if (!ws.isAlive) return ws.terminate();
-    ws.isAlive = false;
-    ws.ping();
-  });
-}, 30000);
-
-app.get('/', (req, res) => {
-  res.send('WebRTC signaling server is running');
-});
-
+// پورت برای اجرا
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Signaling server listening on port ${PORT}`);
+  console.log("🚀 WebSocket server running on port", PORT);
 });
