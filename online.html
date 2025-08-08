@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Online — Publisher</title>
+  <style>
+    body { font-family: Tahoma, sans-serif; padding: 12px; direction: rtl; }
+    video { width: 100%; max-height: 60vh; background: #000; }
+    .controls { margin-top: 8px; display:flex; gap:8px; }
+    button { padding:8px 12px; }
+    .log { margin-top:10px; font-size:13px; color:#333; white-space:pre-wrap; background:#f7f7f7;padding:8px;border-radius:6px; }
+  </style>
+</head>
+<body>
+  <h2>اشتراک‌گذاری صفحه و صدا — Publisher</h2>
+
+  <label>Signaling URL:
+    <input id="signaling" value="wss://online-3sno.onrender.com" style="width:60%" />
+  </label>
+  <br/>
+  <label>Room ID:
+    <input id="room" value="room1" style="width:30%" />
+  </label>
+
+  <div class="controls">
+    <button id="startBtn">شروع اشتراک‌گذاری</button>
+    <button id="stopBtn" disabled>قطع اشتراک</button>
+  </div>
+
+  <h3>پیش‌نمایش محلی (مکالمه و صفحه)</h3>
+  <video id="localPreview" autoplay muted playsinline></video>
+
+  <div class="log" id="log"></div>
+
+<script>
+(() => {
+  const logEl = document.getElementById('log');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const preview = document.getElementById('localPreview');
+  const signalingInput = document.getElementById('signaling');
+  const roomInput = document.getElementById('room');
+
+  function log(...args){ console.log(...args); logEl.textContent += args.map(a => typeof a==='object' ? JSON.stringify(a) : a).join(' ') + '\n'; logEl.scrollTop = 9999; }
+
+  let ws = null;
+  let localScreenStream = null;
+  let localMicStream = null;
+  let combinedStream = null;
+  // map viewerId -> RTCPeerConnection
+  const peerMap = new Map();
+
+  // STUN/TURN – خیلی ساده یک STUN عمومی (بهبود: TURN برای NATهای سخت)
+  const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+  startBtn.onclick = start;
+  stopBtn.onclick = stop;
+
+  async function start() {
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    const SIGNALING_URL = signalingInput.value.trim();
+    const ROOM_ID = roomInput.value.trim();
+    if(!SIGNALING_URL || !ROOM_ID){ alert('آدرس signaling یا room را وارد کن'); startBtn.disabled=false; stopBtn.disabled=true; return; }
+
+    try {
+      // 1) گرفتن صفحه نمایش (video) — audio: true در بعضی اندرویدها ممکن است صدای داخلی را هم بفرستد
+      localScreenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    } catch (e) {
+      log('خطا در getDisplayMedia:', e);
+      // اگر صفحه نگرفتیم، زود برگرد
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      return;
+    }
+
+    // 2) گرفتن میکروفون جدا (برای اطمینان از داشتن ورودی میکروفون)
+    try {
+      localMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      log('دسترسی میکروفون داده نشده یا خطا:', e);
+      // ادامه می‌دهیم حتی اگر میکروفون نباشد — ممکن است صفحه صدای داخلی داشته باشد
+      localMicStream = null;
+    }
+
+    // 3) ترکیب ترک‌ها (video از صفحه + audio از هر منبعی که داریم)
+    combinedStream = new MediaStream();
+    // video tracks
+    localScreenStream.getVideoTracks().forEach(t => combinedStream.addTrack(t));
+    // prefer: میکروفون + اگر صفحه نیز audio داشته باشد، هر دو را اضافه می‌کنیم (مرتب کردن میکسر صدا نیازمند سرور مدیاسِرور است)
+    if (localMicStream) {
+      localMicStream.getAudioTracks().forEach(t => combinedStream.addTrack(t));
+    }
+    // همچنین اگر صفحه خودش audio داشت و میکروفون نداشت، آن را اضافه کن
+    if (!localMicStream) {
+      localScreenStream.getAudioTracks().forEach(t => combinedStream.addTrack(t));
+    }
+
+    preview.srcObject = combinedStream;
+
+    // 4) اتصال به signaling server
+    ws = new WebSocket(SIGNALING_URL);
+    ws.onopen = () => {
+      log('WS connected. Joining as publisher room=', ROOM_ID);
+      ws.send(JSON.stringify({ type: 'join', role: 'publisher', room: ROOM_ID }));
+    };
+
+    ws.onmessage = async (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch(e){ log('invalid json from ws', evt.data); return; }
+      log('recv', msg);
+
+      if (msg.type === 'viewer-joined') {
+        // یک viewer جدید آمده؛ یک RTCPeerConnection جدید بساز برای viewerId
+        const viewerId = msg.viewerId;
+        createPeerForViewer(viewerId);
+      } else if (msg.type === 'answer') {
+        const { viewerId, answer } = msg;
+        const pc = peerMap.get(viewerId);
+        if (pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          log('setRemoteDescription (answer) for', viewerId);
+        } else {
+          log('answer received but pc not found for', viewerId);
+        }
+      } else if (msg.type === 'candidate') {
+        const { viewerId, candidate } = msg;
+        const pc = peerMap.get(viewerId);
+        if (pc && candidate) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } catch(e){ log('addIceCandidate error', e); }
+        }
+      } else if (msg.type === 'viewer-left') {
+        const { viewerId } = msg;
+        closePeer(viewerId);
+      } else if (msg.type === 'publisher-left') {
+        // shouldn't happen for publisher
+      } else if (msg.type === 'joined') {
+        log('joined as publisher ok');
+      } else {
+        log('unknown msg', msg);
+      }
+    };
+
+    ws.onclose = () => { log('WS closed'); };
+    ws.onerror = (e) => { log('WS error', e); };
+
+    // cleanup when user stops sharing screen from UI of browser
+    const screenTrack = localScreenStream.getVideoTracks()[0];
+    screenTrack.onended = () => {
+      log('Screen share stopped by user');
+      stop();
+    };
+  }
+
+  function createPeerForViewer(viewerId) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      log('WS not open; cannot create peer');
+      return;
+    }
+    if (peerMap.has(viewerId)) {
+      log('peer already exists for', viewerId);
+      return;
+    }
+
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    peerMap.set(viewerId, pc);
+    log('create pc for viewer', viewerId);
+
+    // add local tracks to this pc
+    if (combinedStream) {
+      combinedStream.getTracks().forEach(track => pc.addTrack(track, combinedStream));
+    }
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        ws.send(JSON.stringify({ type: 'candidate', room: roomInput.value.trim(), viewerId, candidate: e.candidate }));
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      log('pc state for', viewerId, pc.connectionState);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
+        closePeer(viewerId);
+      }
+    };
+
+    // create offer for this viewer
+    pc.createOffer().then(async (offer) => {
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: 'offer', room: roomInput.value.trim(), viewerId, offer }));
+      log('offer sent to server for viewer', viewerId);
+    }).catch(e => log('createOffer error', e));
+  }
+
+  function closePeer(viewerId) {
+    const pc = peerMap.get(viewerId);
+    if (pc) {
+      try { pc.close(); } catch(e) {}
+      peerMap.delete(viewerId);
+      log('closed pc for', viewerId);
+    }
+  }
+
+  async function stop() {
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+
+    // notify server we leave (publisher leaving)
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'leave', room: roomInput.value.trim() })); } catch(e) {}
+      ws.close();
+      ws = null;
+    }
+
+    // close all peer connections
+    for (const [vid, pc] of peerMap.entries()) {
+      try { pc.close(); } catch(e) {}
+    }
+    peerMap.clear();
+
+    // stop local tracks
+    if (localScreenStream) {
+      localScreenStream.getTracks().forEach(t => t.stop());
+      localScreenStream = null;
+    }
+    if (localMicStream) {
+      localMicStream.getTracks().forEach(t => t.stop());
+      localMicStream = null;
+    }
+    if (combinedStream) {
+      combinedStream.getTracks().forEach(t => t.stop());
+      combinedStream = null;
+    }
+    preview.srcObject = null;
+    log('stopped publishing');
+  }
+
+  // unload cleanup
+  window.addEventListener('beforeunload', () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'leave', room: roomInput.value.trim() })); } catch(e) {}
+    }
+  });
+
+})();
+</script>
+</body>
+</html>
