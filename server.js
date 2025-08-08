@@ -1,5 +1,4 @@
-// ✅ server.js (نسخه به‌روز شده)
-// افزودن ویژگی‌های جدید: تبلیغ، زیرنویس، شمارنده تماشاچی‌ها
+// server.js
 
 const express = require('express');
 const http = require('http');
@@ -32,46 +31,43 @@ wss.on('connection', (ws, req) => {
     }
 
     const { type, room: roomId = ws.roomId } = msg;
+
+    // اگر join هست و اتاق وجود ندارد آن را بساز
+    if (type === 'join') {
+      const { role, room } = msg;
+      if (!room) return safeSend(ws, { type: 'error', reason: 'missing room' });
+
+      if (!rooms[room]) rooms[room] = { publisher: null, viewers: new Map() };
+      ws.roomId = room;
+      ws.role = role;
+
+      const roomObj = rooms[room];
+
+      if (role === 'publisher') {
+        if (roomObj.publisher && roomObj.publisher !== ws) {
+          safeSend(roomObj.publisher, { type: 'info', reason: 'new-publisher-replaced' });
+          // قبلی را قطع کن
+          try { roomObj.publisher.close(); } catch {}
+        }
+        roomObj.publisher = ws;
+        safeSend(ws, { type: 'joined', role: 'publisher', room });
+      } else if (role === 'viewer') {
+        const viewerId = uuidv4();
+        ws.viewerId = viewerId;
+        roomObj.viewers.set(viewerId, ws);
+        safeSend(ws, { type: 'joined', role: 'viewer', room, viewerId });
+        if (roomObj.publisher) {
+          safeSend(roomObj.publisher, { type: 'viewer-joined', viewerId });
+        }
+      }
+      return;
+    }
+
     if (!roomId || !rooms[roomId]) {
       if (type !== 'join') safeSend(ws, { type: 'error', reason: 'unknown room' });
       return;
     }
     const room = rooms[roomId];
-
-    if (type === 'join') {
-      const { role, room } = msg;
-      if (!room) return safeSend(ws, { type: 'error', reason: 'missing room' });
-
-      ws.roomId = room;
-      ws.role = role;
-
-      if (!rooms[room]) rooms[room] = { publisher: null, viewers: new Map() };
-
-      if (role === 'publisher') {
-        if (rooms[room].publisher && rooms[room].publisher !== ws) {
-          safeSend(rooms[room].publisher, { type: 'info', reason: 'new-publisher-replaced' });
-        }
-        rooms[room].publisher = ws;
-        safeSend(ws, { type: 'joined', role: 'publisher', room });
-      } else if (role === 'viewer') {
-        const viewerId = uuidv4();
-        ws.viewerId = viewerId;
-        rooms[room].viewers.set(viewerId, ws);
-        safeSend(ws, { type: 'joined', role: 'viewer', room, viewerId });
-        if (rooms[room].publisher) {
-          safeSend(rooms[room].publisher, { type: 'viewer-joined', viewerId });
-        }
-      }
-      return;
-    }
-
-    // 📺 زیرنویس یا تبلیغ
-    if (type === 'subtitle' || type === 'control') {
-      for (const [_, viewerWs] of room.viewers) {
-        safeSend(viewerWs, msg);
-      }
-      return;
-    }
 
     if (type === 'offer') {
       const { viewerId, offer } = msg;
@@ -82,8 +78,7 @@ wss.on('connection', (ws, req) => {
 
     if (type === 'answer') {
       const { viewerId, answer } = msg;
-      const pub = room.publisher;
-      if (pub) safeSend(pub, { type: 'answer', viewerId, answer });
+      if (room.publisher) safeSend(room.publisher, { type: 'answer', viewerId, answer });
       return;
     }
 
@@ -93,8 +88,7 @@ wss.on('connection', (ws, req) => {
         const viewer = room.viewers.get(viewerId);
         if (viewer) safeSend(viewer, { type: 'candidate', candidate, viewerId });
       } else if (ws.role === 'viewer') {
-        const pub = room.publisher;
-        if (pub) safeSend(pub, { type: 'candidate', candidate, viewerId: ws.viewerId });
+        if (room.publisher) safeSend(room.publisher, { type: 'candidate', candidate, viewerId: ws.viewerId });
       }
       return;
     }
@@ -104,8 +98,16 @@ wss.on('connection', (ws, req) => {
         room.viewers.delete(ws.viewerId);
         if (room.publisher) safeSend(room.publisher, { type: 'viewer-left', viewerId: ws.viewerId });
       } else if (ws.role === 'publisher') {
-        for (const [_, vws] of room.viewers) safeSend(vws, { type: 'publisher-left' });
+        for (const [, vws] of room.viewers) safeSend(vws, { type: 'publisher-left' });
         room.publisher = null;
+      }
+      return;
+    }
+
+    // پیام‌های کنترل مثل تبلیغ و زیرنویس
+    if (type === 'control' || type === 'subtitle') {
+      for (const [, viewerWs] of room.viewers) {
+        safeSend(viewerWs, msg);
       }
       return;
     }
@@ -120,17 +122,21 @@ wss.on('connection', (ws, req) => {
       room.viewers.delete(ws.viewerId);
       if (room.publisher) safeSend(room.publisher, { type: 'viewer-left', viewerId: ws.viewerId });
     } else if (ws.role === 'publisher') {
-      for (const [_, vws] of room.viewers) safeSend(vws, { type: 'publisher-left' });
+      for (const [, vws] of room.viewers) safeSend(vws, { type: 'publisher-left' });
       room.publisher = null;
     }
 
-    if (!room.publisher && room.viewers.size === 0) delete rooms[roomId];
+    // حذف اتاق اگر خالی شد
+    if (!room.publisher && room.viewers.size === 0) {
+      delete rooms[roomId];
+    }
   });
 });
 
+// پاکسازی اتصال‌های قطع شده
 setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) return ws.terminate();
+  wss.clients.forEach(ws => {
+    if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
     ws.ping();
   });
