@@ -14,144 +14,91 @@ const io = socketIo(server, {
   }
 });
 
-// وضعیت‌های سیستم
 let broadcaster = null;
 let viewers = [];
-let adPlaying = null;
-let subtitle = null;
-let isLive = false;
+let isStreaming = false;
 
 io.on('connection', (socket) => {
-  console.log('یک کاربر متصل شد:', socket.id);
+  console.log('User connected:', socket.id);
 
-  // مدیریت اتصال Broadcaster (ارسال کننده)
-  socket.on('broadcaster', () => {
+  // Broadcaster connection
+  socket.on('registerBroadcaster', () => {
     broadcaster = socket.id;
-    console.log('Broadcaster متصل شد:', broadcaster);
-    socket.emit('broadcasterAcknowledged');
-    
-    // اگر کنترلر منتظر است، به او اطلاع دهیم
-    io.emit('streamReady');
+    console.log('Broadcaster registered:', broadcaster);
+    io.emit('broadcasterAvailable');
   });
 
-  // مدیریت اتصال Viewer (تماشاچی)
-  socket.on('viewer', () => {
+  // Viewer connection
+  socket.on('registerViewer', () => {
     viewers.push(socket.id);
-    console.log('Viewer متصل شد:', socket.id);
-    
-    // اگر پخش زنده فعال است، به تماشاچی اطلاع دهیم
-    if (isLive && broadcaster) {
+    console.log('Viewer registered:', socket.id);
+    if (broadcaster && isStreaming) {
       socket.emit('streamStarted');
     }
   });
 
-  // مدیریت اتصال Controller (کنترلر)
-  socket.on('controller', () => {
-    console.log('Controller متصل شد:', socket.id);
-    
-    // اگر Broadcaster آماده است، به کنترلر اطلاع دهیم
+  // Controller connection
+  socket.on('registerController', () => {
+    console.log('Controller registered:', socket.id);
     if (broadcaster) {
-      socket.emit('streamReady');
+      socket.emit('broadcasterReady');
     }
   });
 
-  // درخواست شروع پخش زنده از کنترلر
+  // Start stream from controller
   socket.on('startStream', () => {
     if (!broadcaster) {
-      console.log('هیچ Broadcasterی برای شروع پخش زنده وجود ندارد');
+      console.log('No broadcaster available');
       return;
     }
-    
-    isLive = true;
-    console.log('پخش زنده شروع شد');
-    
-    // به Broadcaster درخواست ایجاد offer بدهید
-    io.to(broadcaster).emit('requestOffer');
-    
-    // به تمام تماشاچیان اطلاع دهید
+    isStreaming = true;
+    io.to(broadcaster).emit('createOffer');
     io.emit('streamStarted');
+    console.log('Stream started');
   });
 
-  // توقف پخش زنده از کنترلر
+  // Stop stream from controller
   socket.on('stopStream', () => {
-    isLive = false;
-    console.log('پخش زنده متوقف شد');
+    isStreaming = false;
     io.emit('streamStopped');
+    console.log('Stream stopped');
   });
 
-  // دریافت offer از Broadcaster
-  socket.on('offerFromBroadcaster', (offer) => {
-    console.log('Offer دریافت شد از Broadcaster');
-    
-    // ارسال offer به تمام تماشاچیان
-    viewers.forEach(viewerId => {
-      io.to(viewerId).emit('offer', broadcaster, offer);
-    });
+  // WebRTC Signaling
+  socket.on('offer', (offer, targetId) => {
+    socket.to(targetId).emit('offer', offer, socket.id);
   });
 
-  // دریافت answer از Viewer
-  socket.on('answerFromViewer', (viewerId, answer) => {
-    console.log('Answer دریافت شد از Viewer:', viewerId);
-    io.to(broadcaster).emit('answerFromViewer', answer);
+  socket.on('answer', (answer, targetId) => {
+    socket.to(targetId).emit('answer', answer, socket.id);
   });
 
-  // مدیریت ICE Candidates از Broadcaster
-  socket.on('candidateFromBroadcaster', (candidate) => {
-    viewers.forEach(viewerId => {
-      io.to(viewerId).emit('candidate', candidate);
-    });
+  socket.on('candidate', (candidate, targetId) => {
+    socket.to(targetId).emit('candidate', candidate, socket.id);
   });
 
-  // مدیریت ICE Candidates از Viewer
-  socket.on('candidateFromViewer', (candidate) => {
-    if (broadcaster) {
-      io.to(broadcaster).emit('candidateFromViewer', candidate);
-    }
-  });
-
-  // کنترل تبلیغات
+  // Ads control
   socket.on('playAd', (adNumber) => {
-    adPlaying = adNumber;
-    console.log(`تبلیغ ${adNumber} در حال پخش`);
     io.emit('adPlaying', adNumber);
   });
 
   socket.on('stopAd', () => {
-    adPlaying = null;
-    console.log('تبلیغ متوقف شد');
     io.emit('adStopped');
   });
 
-  // مدیریت زیرنویس
-  socket.on('setSubtitle', (text) => {
-    subtitle = text;
-    console.log('زیرنویس تنظیم شد:', text);
-    io.emit('subtitleUpdated', text);
-  });
-
-  socket.on('removeSubtitle', () => {
-    subtitle = null;
-    console.log('زیرنویس حذف شد');
-    io.emit('subtitleRemoved');
-  });
-
-  // مدیریت قطع ارتباط
+  // Disconnection
   socket.on('disconnect', () => {
-    console.log('کاربر قطع شد:', socket.id);
-    
+    console.log('User disconnected:', socket.id);
     if (socket.id === broadcaster) {
       broadcaster = null;
-      isLive = false;
-      console.log('Broadcaster قطع شد');
+      isStreaming = false;
       io.emit('broadcasterDisconnected');
     }
-    
     viewers = viewers.filter(viewer => viewer !== socket.id);
   });
 });
 
-// راه‌اندازی سرور
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`سرور در حال اجرا روی پورت ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
