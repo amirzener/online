@@ -175,76 +175,75 @@ wss.on('connection', (ws, req) => {
     }
 
     // پیام‌های کنترل
-    if (type === 'control') {
-      const { action } = msg;
-      const pub = roomObj.publisher;
-      
-      if (!pub && action !== 'stop-stream') {
-        safeSend(ws, { type: 'error', reason: 'no-publisher' });
-        return;
-      }
-      
-      if (action === 'start-stream') {
-        roomObj.streamActive = true;
-        // به همه ویوورها اطلاع بده که استریم شروع شده
-        for (const [vid, vws] of roomObj.viewers.entries()) {
-          safeSend(vws, { type: 'stream-started' });
-        }
-        // به کنترلر اطلاع بده
-        if (roomObj.controller) {
-          safeSend(roomObj.controller, { type: 'stream-started' });
-        }
-      } 
-      else if (action === 'stop-stream') {
-        roomObj.streamActive = false;
-        // به همه ویوورها اطلاع بده که استریم متوقف شده
-        for (const [vid, vws] of roomObj.viewers.entries()) {
-          safeSend(vws, { type: 'stream-stopped' });
-        }
-        // به کنترلر اطلاع بده
-        if (roomObj.controller) {
-          safeSend(roomObj.controller, { type: 'stream-stopped' });
-        }
-      }
-      else if (action === 'play-ad') {
-        const { adId, adUrl } = msg;
-        roomObj.currentAd = adId;
-        // به همه ویوورها اطلاع بده که آگهی پخش شود
-        for (const [vid, vws] of roomObj.viewers.entries()) {
-          safeSend(vws, { type: 'play-ad', adId, adUrl });
-        }
-        // به کنترلر اطلاع بده
-        if (roomObj.controller) {
-          safeSend(roomObj.controller, { type: 'ad-started', adId });
-        }
-      }
-      else if (action === 'resume-stream') {
-        roomObj.currentAd = null;
-        // به همه ویوورها اطلاع بده که به استریم بازگردند
-        for (const [vid, vws] of roomObj.viewers.entries()) {
-          safeSend(vws, { type: 'resume-stream' });
-        }
-        // به کنترلر اطلاع بده
-        if (roomObj.controller) {
-          safeSend(roomObj.controller, { type: 'ad-stopped' });
-        }
-      }
-      else if (action === 'send-subtitle') {
-        const { text } = msg;
-        // زیرنویس را به همه ویوورها ارسال کن
-        for (const [vid, vws] of roomObj.viewers.entries()) {
-          safeSend(vws, { type: 'subtitle', text });
-        }
-      }
-      else if (action === 'clear-subtitle') {
-        // پاک کردن زیرنویس برای همه ویوورها
-        for (const [vid, vws] of roomObj.viewers.entries()) {
-          safeSend(vws, { type: 'clear-subtitle' });
-        }
-      }
-      return;
+   if (type === 'control') {
+  const { action } = msg;
+  const pub = roomObj.publisher;
+  
+  if (!pub && action !== 'stop-stream') {
+    safeSend(ws, { type: 'error', reason: 'no-publisher' });
+    return;
+  }
+  
+  if (action === 'start-stream') {
+    roomObj.streamActive = true;
+    for (const [vid, vws] of roomObj.viewers.entries()) {
+      safeSend(vws, { type: 'stream-started' });
     }
-
+    if (roomObj.controller) {
+      safeSend(roomObj.controller, { type: 'stream-started' });
+    }
+  } 
+  else if (action === 'stop-stream') {
+    roomObj.streamActive = false;
+    for (const [vid, vws] of roomObj.viewers.entries()) {
+      safeSend(vws, { type: 'stream-stopped' });
+    }
+    if (roomObj.controller) {
+      safeSend(roomObj.controller, { type: 'stream-stopped' });
+    }
+  }
+  else if (action === 'mute-audio') {
+    for (const [vid, vws] of roomObj.viewers.entries()) {
+      safeSend(vws, { type: 'mute-audio' });
+    }
+  }
+  else if (action === 'play-ad') {
+    const { adId, adUrl, muteAudio } = msg;
+    roomObj.currentAd = adId;
+    for (const [vid, vws] of roomObj.viewers.entries()) {
+      safeSend(vws, { 
+        type: 'play-ad', 
+        adId, 
+        adUrl,
+        muteAudio: muteAudio || false
+      });
+    }
+    if (roomObj.controller) {
+      safeSend(roomObj.controller, { type: 'ad-started', adId });
+    }
+  }
+  else if (action === 'resume-stream') {
+    roomObj.currentAd = null;
+    for (const [vid, vws] of roomObj.viewers.entries()) {
+      safeSend(vws, { type: 'resume-stream' });
+    }
+    if (roomObj.controller) {
+      safeSend(roomObj.controller, { type: 'ad-stopped' });
+    }
+  }
+  else if (action === 'send-subtitle') {
+    const { text } = msg;
+    for (const [vid, vws] of roomObj.viewers.entries()) {
+      safeSend(vws, { type: 'subtitle', text });
+    }
+  }
+  else if (action === 'clear-subtitle') {
+    for (const [vid, vws] of roomObj.viewers.entries()) {
+      safeSend(vws, { type: 'clear-subtitle' });
+    }
+  }
+  return;
+}
     // پیام leave
     if (type === 'leave') {
       const { viewerId } = msg;
