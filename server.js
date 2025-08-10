@@ -460,7 +460,7 @@ setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
         ws.isAlive = false;
-        ws.ping(null, false, true);
+        ws.ping('heartbeat', false);
     });
 }, 30000);
 
