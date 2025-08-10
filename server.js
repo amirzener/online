@@ -5,21 +5,27 @@ const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
+const cors = require('cors');
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 const PORT = process.env.PORT || 10000;
-
-// ساختار اتاق‌ها:
-// rooms[roomId] = { 
-//   publisher: ws|null, 
-//   controller: ws|null,
-//   viewers: Map<viewerId, ws>, 
-//   streamActive: false, 
-//   currentAd: null 
-// }
+const onlineStats = {
+    totalViewers: 0,
+    currentViewers: 0,
+    viewerHistory: []
+};
 const rooms = Object.create(null);
-
+app.use(cors({
+  origin: ['https://amiralfa.ir', 'http://localhost'], // دامنه‌های مجاز
+  methods: ['GET', 'POST'],
+  credentials: true
+}));
+// برای WebSocket (اگر نیاز است)
+wss.on('headers', (headers) => {
+  headers.push('Access-Control-Allow-Origin: https://amiralfa.ir');
+  headers.push('Access-Control-Allow-Credentials: true');
+});
 function safeSend(ws, msgObj) {
   try {
     ws.send(JSON.stringify(msgObj));
@@ -313,7 +319,52 @@ wss.on('connection', (ws, req) => {
     }
   });
 });
+// در بخش join برای viewer:
+else if (role === 'viewer') {
+    const viewerId = uuidv4();
+    ws.viewerId = viewerId;
+    rooms[room].viewers.set(viewerId, ws);
+    
+    // آپدیت آمار
+    onlineStats.currentViewers++;
+    onlineStats.totalViewers++;
+    onlineStats.viewerHistory.push({
+        id: viewerId,
+        name: msg.name || 'ناشناس', // اضافه کردن نام کاربر
+        joinTime: new Date(),
+        leaveTime: null,
+        room: room
+    });
+    
+    safeSend(ws, { type: 'joined', role: 'viewer', room, viewerId });
+    console.log(`Viewer ${viewerId} joined room=${room}`);
+}
 
+// در بخش close برای viewer:
+else if (ws.role === 'viewer') {
+    const id = ws.viewerId;
+    rooms[roomId].viewers.delete(id);
+    
+    // آپدیت آمار
+    onlineStats.currentViewers--;
+    const viewerRecord = onlineStats.viewerHistory.find(v => v.id === id);
+    if (viewerRecord) {
+        viewerRecord.leaveTime = new Date();
+    }
+    
+    const pub = rooms[roomId].publisher;
+    if (pub) safeSend(pub, { type: 'viewer-left', viewerId: id });
+    console.log(`Viewer ${id} disconnected from room=${roomId}`);
+}
+
+// اضافه کردن endpoint جدید برای آمار
+app.get('/stats', (req, res) => {
+    res.json({
+        currentViewers: onlineStats.currentViewers,
+        totalViewers: onlineStats.totalViewers,
+        viewerHistory: onlineStats.viewerHistory
+    });
+});
 // بررسی سلامت اتصالات
 setInterval(() => {
   wss.clients.forEach((ws) => {
